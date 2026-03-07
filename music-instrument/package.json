@@ -1,0 +1,55 @@
+{
+  "name": "@tango/instrument-music",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "bun node_modules/tango-api/src/cli.ts dev",
+    "build": "bun node_modules/tango-api/src/cli.ts build",
+    "sync": "bun node_modules/tango-api/src/cli.ts sync",
+    "validate": "bun node_modules/tango-api/src/cli.ts validate",
+    "test": "bun test ./test"
+  },
+  "dependencies": {
+    "tango-api": "github:MartinGonzalez/tango-api#v0.0.2-rc45"
+  },
+  "devDependencies": {
+    "@types/react": "^18.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "tango": {
+    "instrument": {
+      "id": "music-instrument",
+      "name": "Music",
+      "group": "Custom",
+      "category": "media",
+      "runtime": "react",
+      "entrypoint": "./dist/index.js",
+      "backendEntrypoint": "./dist/backend.js",
+      "hostApiVersion": "2.0.0",
+      "launcher": {
+        "sidebarShortcut": {
+          "enabled": true,
+          "label": "Music",
+          "icon": "play",
+          "order": 40
+        }
+      },
+      "panels": {
+        "sidebar": true,
+        "first": true,
+        "second": true,
+        "right": false
+      },
+      "permissions": [
+        "stages.observe"
+      ],
+      "backgroundRefresh": {
+        "enabled": true,
+        "intervalSeconds": 10
+      }
+    }
+  }
+}

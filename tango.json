@@ -1,0 +1,8 @@
+{
+  "instruments": [
+    { "path": "./pr-instrument" },
+    { "path": "./music-instrument" },
+    { "path": "./diaries-instrument" },
+    { "path": "./tango-example" }
+  ]
+}
