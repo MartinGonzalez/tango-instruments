@@ -18,6 +18,7 @@
     "instrument": {
       "id": "diaries-instrument",
       "name": "Diaries",
+      "description": "Automatically track your daily coding activity and generate dev diary entries from your sessions.",
       "group": "Core",
       "category": "productivity",
       "runtime": "react",

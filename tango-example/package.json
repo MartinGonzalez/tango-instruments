@@ -22,6 +22,7 @@
     "instrument": {
       "id": "tango-integration",
       "name": "Tango Integration",
+      "description": "Example instrument showcasing the Tango SDK. Use as a reference for building your own instruments.",
       "group": "Custom",
       "category": "developer-tools",
       "runtime": "react",

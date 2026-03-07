@@ -23,6 +23,7 @@
     "instrument": {
       "id": "music-instrument",
       "name": "Music",
+      "description": "Control Apple Music playback, browse playlists, and see what's currently playing without leaving Tango.",
       "group": "Custom",
       "category": "media",
       "runtime": "react",

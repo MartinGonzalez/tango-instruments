@@ -18,6 +18,7 @@
     "instrument": {
       "id": "pr-instrument",
       "name": "Pull Requests",
+      "description": "Review and manage GitHub pull requests directly from Tango. Browse open PRs, view diffs, and track review status.",
       "group": "Core",
       "category": "developer-tools",
       "runtime": "react",
