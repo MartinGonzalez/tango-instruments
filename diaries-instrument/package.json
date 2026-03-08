@@ -1,6 +1,6 @@
 {
   "name": "@tango/instrument-diaries",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
@@ -9,7 +9,11 @@
     "build": "bun node_modules/tango-api/src/cli.ts build",
     "sync": "bun node_modules/tango-api/src/cli.ts sync",
     "validate": "bun node_modules/tango-api/src/cli.ts validate",
-    "test": "bun test ./test"
+    "test": "bun test ./test",
+    "publish": "bun node_modules/tango-api/src/cli.ts publish",
+    "publish:patch": "bun node_modules/tango-api/src/cli.ts publish patch",
+    "publish:minor": "bun node_modules/tango-api/src/cli.ts publish minor",
+    "publish:major": "bun node_modules/tango-api/src/cli.ts publish major"
   },
   "dependencies": {
     "tango-api": "github:MartinGonzalez/tango-api#v0.0.2-rc63"
