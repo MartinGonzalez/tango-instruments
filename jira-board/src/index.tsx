@@ -9,6 +9,8 @@ import {
   UIPanelHeader,
   UIList,
   UIListItem,
+  UIGroupList,
+  UIGroupItem,
   UIBadge,
   UIKeyValue,
   UIMarkdownRenderer,
@@ -257,17 +259,21 @@ function TicketListPanel() {
         ) : issues.length === 0 ? (
           <UIEmptyState title="No tickets" description="No tickets found for this board" />
         ) : (
-          <UIList>
+          <UIGroupList>
             {issues.map((issue) => (
-              <UIListItem
+              <UIGroupItem
                 key={issue.key}
                 title={issue.key}
                 subtitle={issue.fields.summary ?? ""}
                 active={selectedKey === issue.key}
                 onClick={() => handleSelectTicket(issue.key)}
+                meta={issue.fields.status?.name
+                  ? <UIBadge label={issue.fields.status.name} tone={statusTone(issue.fields.status.name)} />
+                  : undefined
+                }
               />
             ))}
-          </UIList>
+          </UIGroupList>
         )}
       </UIScrollArea>
     </UIRoot>
