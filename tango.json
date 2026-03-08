@@ -1,8 +1,19 @@
 {
   "instruments": [
-    { "path": "./pr-instrument" },
-    { "path": "./music-instrument" },
-    { "path": "./diaries-instrument" },
-    { "path": "./tango-example" }
+    {
+      "path": "./diaries-instrument"
+    },
+    {
+      "path": "./jira-board"
+    },
+    {
+      "path": "./music-instrument"
+    },
+    {
+      "path": "./pr-instrument"
+    },
+    {
+      "path": "./tango-example"
+    }
   ]
 }
