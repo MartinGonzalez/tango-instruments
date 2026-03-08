@@ -12,7 +12,7 @@
     "test": "bun test ./test"
   },
   "dependencies": {
-    "tango-api": "github:MartinGonzalez/tango-api#v0.0.2-rc46"
+    "tango-api": "github:MartinGonzalez/tango-api#v0.0.2-rc63"
   },
   "tango": {
     "instrument": {
