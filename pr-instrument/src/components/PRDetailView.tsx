@@ -42,6 +42,7 @@ export function PRDetailView() {
   const [currentUser, setCurrentUser] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<string>("conversation");
   const [agentReviewStarting, setAgentReviewStarting] = useState(false);
+  const [agentReviewError, setAgentReviewError] = useState<string | null>(null);
 
   // Editable title state
   const [editingTitle, setEditingTitle] = useState(false);
@@ -55,6 +56,7 @@ export function PRDetailView() {
       const { repo, number } = payload.payload as { repo: string; number: number };
       setSelected({ repo, number });
       setActiveTab("conversation");
+      setAgentReviewError(null);
     }
   });
 
@@ -148,6 +150,7 @@ export function PRDetailView() {
   const handleStartAgentReview = useCallback(async () => {
     if (!detail || !selected) return;
     setAgentReviewStarting(true);
+    setAgentReviewError(null);
     try {
       await api.actions.call("startAgentReview", {
         repo: selected.repo,
@@ -155,8 +158,9 @@ export function PRDetailView() {
         headSha: detail.headSha,
       });
       await loadAgentReviews(selected.repo, selected.number);
-    } catch {
-      // Silently ignore
+      setActiveTab("agent_reviews");
+    } catch (err) {
+      setAgentReviewError(err instanceof Error ? err.message : String(err));
     } finally {
       setAgentReviewStarting(false);
     }
@@ -303,43 +307,10 @@ export function PRDetailView() {
     </div>
   );
 
-  const conversationContainerContent = (
-    <>
-      {prHeader}
-      <div style={{ borderTop: "1px solid var(--tui-border)", margin: "12px 0" }} />
-      <ConversationTabContainerContent
-        detail={detail}
-        seenCount={seenCount}
-        totalFiles={detail.files.length}
-        onDescriptionUpdated={() => {
-          if (selected) loadDetail(selected.repo, selected.number, true);
-        }}
-      />
-    </>
-  );
-
   const tabs = [
-    {
-      value: "conversation",
-      label: "Conversation",
-      content: conversationContainerContent,
-    },
+    { value: "conversation", label: "Conversation" },
     ...(agentReviews.length > 0
-      ? [{
-          value: "agent_reviews",
-          label: `Agent reviews (${agentReviews.length})`,
-          content: (
-            <>
-              {prHeader}
-              <div style={{ borderTop: "1px solid var(--tui-border)", margin: "12px 0" }} />
-              <AgentReviewsTab
-                repo={selected.repo}
-                number={selected.number}
-                agentReviews={agentReviews}
-              />
-            </>
-          ),
-        }]
+      ? [{ value: "agent_reviews", label: `Agent reviews (${agentReviews.length})` }]
       : []),
   ];
 
@@ -348,6 +319,8 @@ export function PRDetailView() {
       <UIScrollArea>
         <div className="tui-col" style={{ gap: 8, padding: "8px 16px" }}>
           <UIContainer>
+            {prHeader}
+            <div style={{ borderTop: "1px solid var(--tui-border)", margin: "12px 0" }} />
             <UITabs
               tabs={tabs}
               value={activeTab}
@@ -363,7 +336,40 @@ export function PRDetailView() {
                 />
               }
             />
+            <ConversationTabContainerContent
+              detail={detail}
+              seenCount={seenCount}
+              totalFiles={detail.files.length}
+              onDescriptionUpdated={() => {
+                if (selected) loadDetail(selected.repo, selected.number, true);
+              }}
+            />
           </UIContainer>
+
+          {agentReviewError && (
+            <UIContainer>
+              <div
+                className="tui-row"
+                style={{
+                  alignItems: "center",
+                  gap: 8,
+                  padding: "8px 12px",
+                  background: "var(--tui-bg-danger, rgba(220,38,38,0.1))",
+                  borderRadius: 6,
+                  color: "var(--tui-text-danger, #ef4444)",
+                  fontSize: "13px",
+                }}
+              >
+                <span style={{ flex: 1 }}>{agentReviewError}</span>
+                <UIButton
+                  label="Dismiss"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setAgentReviewError(null)}
+                />
+              </div>
+            </UIContainer>
+          )}
 
           {activeTab === "conversation" && (
             <ConversationTabComments
@@ -371,6 +377,15 @@ export function PRDetailView() {
               onReplied={() => {
                 if (selected) loadDetail(selected.repo, selected.number, true);
               }}
+            />
+          )}
+
+          {activeTab === "agent_reviews" && (
+            <AgentReviewsTab
+              repo={selected.repo}
+              number={selected.number}
+              headSha={detail.headSha}
+              agentReviews={agentReviews}
             />
           )}
         </div>

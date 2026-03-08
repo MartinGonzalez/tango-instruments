@@ -8,13 +8,12 @@ import {
 import { PullRequestProvider } from "./lib/pr-provider.ts";
 import { parseDiff } from "./lib/diff-parser.ts";
 import type {
-  DiffFile,
   PullRequestAgentReviewData,
   PullRequestAgentReviewDocument,
   PullRequestAgentReviewLevel,
   PullRequestAgentReviewRun,
-  PullRequestAgentReviewStatus,
   PullRequestAgentReviewSuggestion,
+  PullRequestDiscardedSuggestion,
   PullRequestReviewState,
 } from "./types.ts";
 
@@ -37,18 +36,6 @@ const ALLOWED_REVIEW_LEVELS = new Set<PullRequestAgentReviewLevel>([
 // ---------------------------------------------------------------------------
 
 const provider = new PullRequestProvider();
-
-type AgentReviewSessionBinding = {
-  runId: string;
-  repo: string;
-  number: number;
-  version: number;
-  filePath: string;
-  resultText: string;
-};
-
-const agentReviewSessions = new Map<string, AgentReviewSessionBinding>();
-let unsubscribers: Array<() => void> = [];
 let cachedCurrentUser: string | null = null;
 
 // ---------------------------------------------------------------------------
@@ -88,6 +75,10 @@ function reviewStateKey(repo: string, number: number): string {
 
 function agentReviewRunsKey(repo: string, number: number): string {
   return `agent-review-runs:${repo}#${number}`;
+}
+
+function discardedSuggestionsKey(repo: string, number: number): string {
+  return `discarded-suggestions:${repo}#${number}`;
 }
 
 function agentReviewDocPath(repo: string, number: number, version: number): string {
@@ -152,6 +143,29 @@ async function getAgentReviewRuns(
   return Array.isArray(runs) ? runs : [];
 }
 
+async function getDiscardedSuggestions(
+  ctx: InstrumentBackendContext,
+  repo: string,
+  number: number
+): Promise<PullRequestDiscardedSuggestion[]> {
+  const list = await ctx.host.storage.getProperty<PullRequestDiscardedSuggestion[]>(
+    discardedSuggestionsKey(repo, number)
+  );
+  return Array.isArray(list) ? list : [];
+}
+
+async function saveDiscardedSuggestions(
+  ctx: InstrumentBackendContext,
+  repo: string,
+  number: number,
+  list: PullRequestDiscardedSuggestion[]
+): Promise<void> {
+  await ctx.host.storage.setProperty(
+    discardedSuggestionsKey(repo, number),
+    list
+  );
+}
+
 async function saveAgentReviewRuns(
   ctx: InstrumentBackendContext,
   repo: string,
@@ -198,78 +212,74 @@ function buildAgentReviewPrompt(params: {
   repo: string;
   number: number;
   headSha: string;
-  outputFilePath: string;
-  cwdSource: "stage" | "home";
-  stagePath?: string | null;
+  prTitle: string;
+  prBody: string;
+  prAuthor: string;
+  baseBranch: string;
+  headBranch: string;
+  diff: string;
+  discardedSuggestions?: PullRequestDiscardedSuggestion[];
 }): string {
-  const repo = String(params.repo ?? "").trim();
-  const number = Math.max(1, Math.trunc(params.number));
-  const headSha = String(params.headSha ?? "").trim();
-  const outputFilePath = String(params.outputFilePath ?? "").trim();
-  const cwdSource = params.cwdSource === "stage" ? "stage" : "home";
-  const stagePath = String(params.stagePath ?? "").trim();
+  const discardedBlock = params.discardedSuggestions?.length
+    ? [
+        "",
+        "## Previously Discarded Suggestions (DO NOT repeat these)",
+        "The reviewer has explicitly dismissed the following suggestions. Do NOT produce suggestions covering the same topic or code location:",
+        ...params.discardedSuggestions.map(
+          (d, i) => `${i + 1}. "${d.title}"${d.path ? ` (${d.path}${d.line ? `:${d.line}` : ""})` : ""} — ${d.reason}`
+        ),
+        "",
+      ]
+    : [];
 
   return [
-    "Run a comprehensive pull request review and produce STRICT JSON output.",
-    "Do not use markdown output as the final artifact.",
+    "You are a senior code reviewer. Review the following pull request and produce STRICT JSON output.",
+    "Respond ONLY with the JSON object — no explanation, no markdown fences, no extra text.",
     "",
-    `Repository: ${repo}`,
-    `Pull Request: #${number}`,
-    `Head SHA: ${headSha || "(unknown)"}`,
-    `Output JSON file (overwrite this exact file): ${outputFilePath}`,
+    `Repository: ${params.repo}`,
+    `Pull Request: #${params.number}`,
+    `Title: ${params.prTitle}`,
+    `Author: ${params.prAuthor}`,
+    `Base: ${params.baseBranch} ← Head: ${params.headBranch}`,
+    `Head SHA: ${params.headSha || "(unknown)"}`,
     "",
-    "Review workflow guidance:",
-    "1. Fetch PR data with GitHub CLI (`gh pr view`, `gh api`, `gh pr diff`) and repository context.",
-    "2. Focus on concrete engineering feedback: correctness, risks, tests, maintainability, and rollout impact.",
-    "3. Keep summaries concise and specific.",
+    "## PR Description",
+    params.prBody || "(no description)",
     "",
-    "Suggestion structure (mandatory for every `suggestions[]` item):",
-    "- `title`: short and specific (max ~10 words).",
-    "- `reason`: 2-3 short lines explaining why this should change now.",
-    "- `solutions`: concise actionable fix; include markdown bullets/snippet only if needed.",
-    "- `benefit`: 1-2 short lines with concrete gains from applying the change.",
-    "- Keep each suggestion concise. Avoid long paragraphs and avoid repeating PR summary content.",
+    "## Diff",
+    params.diff,
+    ...discardedBlock,
+    "## Instructions",
+    "Focus on concrete engineering feedback: correctness, risks, tests, maintainability, and rollout impact.",
+    "Keep summaries concise and specific.",
     "",
     "Required output schema (top-level JSON object):",
     "{",
-    '  "metadata": {',
-    '    "repository": "<owner/repo>",',
-    '    "pr_number": "<number as string>",',
-    '    "author": "<pr author>",',
-    '    "base_branch": "<target branch>",',
-    '    "head_branch": "<feature branch>",',
-    '    "head_sha": "<head sha>"',
-    "  },",
-    '  "pr_description": "<3-6 concise bullet points describing exactly what changed in this PR>",',
     '  "pr_summary": "<5-10 lines max>",',
     '  "strengths": "<5-10 lines max>",',
     '  "improvements": "<5-10 lines max>",',
     '  "suggestions": [',
     "    {",
     '      "level": "Low | Medium | Important | Critical",',
-    '      "title": "<short suggestion title>",',
-    '      "reason": "<why this should change now>",',
-    '      "solutions": "<actionable solution(s), markdown allowed>",',
-    '      "benefit": "<what we gain with this change>",',
+    '      "title": "<short, max ~10 words>",',
+    '      "path": "<file path from the diff this suggestion applies to>",',
+    '      "line": "<line number in the NEW file (right side of the diff) where this suggestion applies>",',
+    '      "reason": "<2-3 short lines>",',
+    '      "solutions": "<actionable fix, markdown allowed>",',
+    '      "benefit": "<1-2 short lines>",',
     '      "applied": false',
     "    }",
     "  ],",
-    '  "final_veredic": "<critical recommendation, what can be deferred, and whether to create a Jira ticket>"',
+    '  "final_veredic": "<critical recommendation, what can be deferred>"',
     "}",
     "",
     "Hard constraints:",
-    "- Write valid JSON only to the output file (no comments, no trailing commas).",
+    "- Valid JSON only. No comments, no trailing commas, no text outside the JSON.",
     "- Include all required keys exactly as specified.",
-    "- Do not add extra keys inside `suggestions[]`.",
-    "- `pr_description` should be concise bullet points (markdown list).",
-    "- `suggestions[].applied` must always be `false` in generated reviews.",
-    "- Every suggestion must include non-empty `title`, `reason`, `solutions`, and `benefit`.",
+    "- `suggestions[].applied` must always be `false`.",
+    "- `suggestions[].path` must be a real file path from the diff (e.g. `src/foo.ts`). Do NOT invent paths.",
+    "- `suggestions[].line` must be a line number from the NEW (right) side of the diff. Use the `+` line numbers. If the suggestion is general, omit `line`.",
     "- If no suggestions, return an empty array.",
-    "- Use GitHub CLI with `-R <owner/repo>` when not in the repository directory.",
-    "",
-    cwdSource === "stage"
-      ? `Execution context: local stage available at ${stagePath}`
-      : "Execution context: no local stage match found; use gh with -R for repository-scoped commands.",
   ].join("\n");
 }
 
@@ -326,10 +336,7 @@ function normalizeAgentReviewData(input: unknown): {
   }
 
   const src = input as Record<string, unknown>;
-  const metadata = normalizeMetadata(src.metadata);
-  if (!metadata) {
-    return { review: null, parseError: "Field `metadata` must be an object" };
-  }
+  const metadata = normalizeMetadata(src.metadata) ?? {};
 
   const prSummary = firstNonEmpty(
     normalizeRichTextField(src.pr_summary),
@@ -362,6 +369,10 @@ function normalizeAgentReviewData(input: unknown): {
     suggestions.push(suggestion);
   }
 
+  const discardedSuggestions = Array.isArray(src.discarded_suggestions)
+    ? (src.discarded_suggestions as unknown[]).filter((v): v is number => typeof v === "number" && Number.isFinite(v))
+    : [];
+
   return {
     review: {
       metadata,
@@ -370,6 +381,7 @@ function normalizeAgentReviewData(input: unknown): {
       strengths,
       improvements,
       suggestions,
+      discarded_suggestions: discardedSuggestions,
       final_veredic: finalVeredic,
     },
     parseError: null,
@@ -429,6 +441,10 @@ function normalizeSuggestion(input: unknown): PullRequestAgentReviewSuggestion |
 
   if (!reasonInput && !solutionsInput && !benefitInput) return null;
 
+  const path = typeof src.path === "string" && src.path.trim() ? src.path.trim() : undefined;
+  const line = typeof src.line === "number" && Number.isFinite(src.line) && src.line > 0
+    ? Math.trunc(src.line)
+    : undefined;
   return {
     level: level as PullRequestAgentReviewLevel,
     title,
@@ -437,6 +453,8 @@ function normalizeSuggestion(input: unknown): PullRequestAgentReviewSuggestion |
     benefit,
     content: buildSuggestionContentMarkdown({ title, reason, solutions, benefit }),
     applied: src.applied,
+    ...(path ? { path } : {}),
+    ...(line ? { line } : {}),
   };
 }
 
@@ -600,170 +618,6 @@ function looksLikeParsableJson(value: string): boolean {
   } catch {
     return false;
   }
-}
-
-// ---------------------------------------------------------------------------
-// Resolve CWD for agent review
-// ---------------------------------------------------------------------------
-
-async function resolveAgentReviewCwd(
-  ctx: InstrumentBackendContext,
-  repo: string
-): Promise<{ cwd: string; source: "stage" | "home"; stagePath: string | null }> {
-  const normalizedRepo = String(repo ?? "").trim().toLowerCase();
-  const stages = await ctx.host.stages.list();
-
-  for (const stagePath of stages) {
-    try {
-      const result = await runCommandInCwd("git", ["config", "--get", "remote.origin.url"], stagePath);
-      if (result.exitCode !== 0) continue;
-      const remoteRepo = parseRepoFromRemoteUrl(result.stdout);
-      if (!remoteRepo) continue;
-      if (remoteRepo.toLowerCase() === normalizedRepo) {
-        return { cwd: stagePath, source: "stage", stagePath };
-      }
-    } catch {
-      continue;
-    }
-  }
-
-  const homeDir = process.env.HOME || "/tmp";
-  return { cwd: homeDir, source: "home", stagePath: null };
-}
-
-function parseRepoFromRemoteUrl(value: string): string | null {
-  const normalized = String(value ?? "").trim();
-  if (!normalized) return null;
-  const withoutProtocol = normalized.replace(/^ssh:\/\//i, "");
-  const match = withoutProtocol.match(/github\.com[:/]([^\s]+)$/i);
-  if (!match) return null;
-  const candidate = match[1]
-    .replace(/\.git$/i, "")
-    .replace(/^\/+/, "")
-    .replace(/\/+$/, "");
-  const parts = candidate.split("/").filter(Boolean);
-  if (parts.length < 2) return null;
-  return `${parts[0]}/${parts[1]}`;
-}
-
-async function runCommandInCwd(
-  command: string,
-  args: string[],
-  cwd: string
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const proc = Bun.spawn([command, ...args], {
-    cwd,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-
-  return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
-}
-
-// ---------------------------------------------------------------------------
-// Session lifecycle handlers
-// ---------------------------------------------------------------------------
-
-function handleSessionStream(
-  ctx: InstrumentBackendContext,
-  payload: { sessionId: string; event: Record<string, unknown> }
-): void {
-  const binding = agentReviewSessions.get(payload.sessionId);
-  if (!binding) return;
-
-  // Accumulate result text for fallback extraction
-  const event = payload.event;
-  if (event.type === "assistant") {
-    const message = event.message as { content?: Array<Record<string, unknown>> } | undefined;
-    const blocks = message?.content;
-    if (Array.isArray(blocks)) {
-      const text = blocks
-        .filter((b) => b && typeof b === "object" && b.type === "text")
-        .map((b) => String(b.text ?? ""))
-        .join("\n")
-        .trim();
-      if (text) binding.resultText += `${text}\n`;
-    }
-  }
-  if (event.type === "result") {
-    const result = String(event.result ?? "").trim();
-    if (result) binding.resultText += `${result}\n`;
-  }
-}
-
-function handleSessionIdResolved(
-  payload: { tempId: string; realId: string }
-): void {
-  const binding = agentReviewSessions.get(payload.tempId);
-  if (!binding) return;
-  agentReviewSessions.delete(payload.tempId);
-  agentReviewSessions.set(payload.realId, binding);
-}
-
-async function handleSessionEnded(
-  ctx: InstrumentBackendContext,
-  payload: { sessionId: string; exitCode: number }
-): Promise<void> {
-  const binding = agentReviewSessions.get(payload.sessionId);
-  if (!binding) return;
-  agentReviewSessions.delete(payload.sessionId);
-
-  const runs = await getAgentReviewRuns(ctx, binding.repo, binding.number);
-  const run = runs.find((r) => r.id === binding.runId);
-  if (!run || run.status !== "running") return;
-
-  const now = new Date().toISOString();
-
-  try {
-    // Try to read the document file
-    const rawFile = await readAgentReviewFile(ctx, binding.filePath);
-    const parsedFile = parseAgentReviewFromRaw(rawFile);
-
-    if (parsedFile.review && !parsedFile.isPlaceholder) {
-      // File has valid review — write clean version
-      await writeAgentReviewFile(ctx, binding.filePath, parsedFile.review);
-      run.status = "completed";
-      run.completedAt = now;
-      run.error = null;
-    } else {
-      // Try extracting from accumulated result text
-      const fallbackRaw = extractJsonCandidateFromText(binding.resultText);
-      const parsedFallback = parseAgentReviewFromRaw(fallbackRaw);
-
-      if (parsedFallback.review && !parsedFallback.isPlaceholder) {
-        await writeAgentReviewFile(ctx, binding.filePath, parsedFallback.review);
-        run.status = "completed";
-        run.completedAt = now;
-        run.error = null;
-      } else {
-        run.status = "failed";
-        run.error = parsedFile.parseError || "Agent review did not produce valid JSON";
-      }
-    }
-  } catch (error) {
-    run.status = "failed";
-    run.error = error instanceof Error ? error.message : String(error);
-  }
-
-  run.sessionId = null;
-  run.updatedAt = now;
-  await saveAgentReviewRuns(ctx, binding.repo, binding.number, runs);
-
-  ctx.emit({
-    event: "pr.agentReviewChanged",
-    payload: {
-      repo: binding.repo,
-      number: binding.number,
-      runId: binding.runId,
-      status: run.status,
-    },
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1118,68 +972,62 @@ export default defineBackend({
           error: null,
         };
 
-        // Write placeholder
-        const placeholder: Record<string, unknown> = {
-          [AGENT_REVIEW_PLACEHOLDER_KEY]: true,
-          metadata: {
-            repository: run.repo,
-            pr_number: String(run.number),
-            version: `v${run.version}`,
-            head_sha: run.headSha || "(unknown)",
-            started_at: run.startedAt,
-          },
-          pr_description: "",
-          pr_summary: "",
-          strengths: "",
-          improvements: "",
-          suggestions: [],
-          final_veredic: AGENT_REVIEW_PLACEHOLDER_TEXT,
-        };
-        await writeAgentReviewFile(ctx, filePath, placeholder);
-
-        // Resolve CWD
-        const cwdResolution = await resolveAgentReviewCwd(ctx, repo);
-
-        // Build prompt
-        const prompt = buildAgentReviewPrompt({
-          repo,
-          number,
-          headSha,
-          outputFilePath: filePath,
-          cwdSource: cwdResolution.source,
-          stagePath: cwdResolution.stagePath,
-        });
-
-        // Start session
-        const session = await ctx.host.sessions.start({
-          prompt,
-          cwd: cwdResolution.cwd,
-          fullAccess: true,
-        });
-
-        run.sessionId = session.sessionId;
         runs.push(run);
         runs.sort((a, b) => a.version - b.version);
         await saveAgentReviewRuns(ctx, repo, number, runs);
 
-        // Track session for lifecycle handling
-        agentReviewSessions.set(session.sessionId, {
-          runId: run.id,
-          repo,
-          number,
-          version: nextVersion,
-          filePath,
-          resultText: "",
+        ctx.emit({
+          event: "pr.agentReviewChanged",
+          payload: { repo, number, runId: run.id, status: "running" },
         });
+
+        // Fetch PR data and diff, then query the LLM
+        try {
+          const [detail, rawDiff, discarded] = await Promise.all([
+            provider.getPullRequestDetail(repo, number),
+            provider.getRawDiff(repo, number),
+            getDiscardedSuggestions(ctx, repo, number),
+          ]);
+
+          const prompt = buildAgentReviewPrompt({
+            repo,
+            number,
+            headSha,
+            prTitle: detail.title,
+            prBody: detail.body ?? "",
+            prAuthor: detail.authorLogin,
+            baseBranch: detail.baseRefName,
+            headBranch: detail.headRefName,
+            diff: rawDiff,
+            discardedSuggestions: discarded,
+          });
+
+          const result = await ctx.host.sessions.query({ prompt });
+
+          // Extract and parse JSON from the response
+          const rawJson = extractJsonCandidateFromText(result.text);
+          const parsed = parseAgentReviewFromRaw(rawJson);
+
+          if (parsed.review && !parsed.isPlaceholder) {
+            await writeAgentReviewFile(ctx, filePath, parsed.review);
+            run.status = "completed";
+            run.completedAt = new Date().toISOString();
+            run.error = null;
+          } else {
+            run.status = "failed";
+            run.error = parsed.parseError || "Agent review did not produce valid JSON";
+          }
+        } catch (error) {
+          run.status = "failed";
+          run.error = error instanceof Error ? error.message : String(error);
+        }
+
+        run.updatedAt = new Date().toISOString();
+        await saveAgentReviewRuns(ctx, repo, number, runs);
 
         ctx.emit({
           event: "pr.agentReviewChanged",
-          payload: {
-            repo,
-            number,
-            runId: run.id,
-            status: "running",
-          },
+          payload: { repo, number, runId: run.id, status: run.status },
         });
 
         return run;
@@ -1443,35 +1291,88 @@ export default defineBackend({
         await writeAgentReviewFile(ctx, run.filePath, nextReview);
       },
     },
-  },
 
-  onStart: async (ctx) => {
-    // Subscribe to session lifecycle events for agent review tracking
-    unsubscribers.push(
-      ctx.host.events.subscribe("session.stream", (payload) => {
-        handleSessionStream(ctx, payload);
-      })
-    );
+    discardSuggestion: {
+      input: {
+        type: "object",
+        properties: {
+          repo: { type: "string" },
+          number: { type: "number" },
+          version: { type: "number" },
+          suggestionIndex: { type: "number" },
+        },
+        required: ["repo", "number", "version", "suggestionIndex"],
+      },
+      handler: async (ctx, input: {
+        repo: string;
+        number: number;
+        version: number;
+        suggestionIndex: number;
+      }) => {
+        const runs = await getAgentReviewRuns(ctx, input.repo, input.number);
+        const run = runs.find((r) => r.version === Math.max(1, Math.trunc(input.version)));
+        if (!run) throw new Error("Review run not found");
 
-    unsubscribers.push(
-      ctx.host.events.subscribe("session.idResolved", (payload) => {
-        handleSessionIdResolved(payload);
-      })
-    );
+        const rawJson = await readAgentReviewFile(ctx, run.filePath);
+        if (!rawJson) throw new Error("Review file not found");
 
-    unsubscribers.push(
-      ctx.host.events.subscribe("session.ended", (payload) => {
-        void handleSessionEnded(ctx, payload);
-      })
-    );
+        let doc: any;
+        try {
+          doc = JSON.parse(rawJson);
+        } catch {
+          throw new Error("Review file contains invalid JSON");
+        }
+
+        if (!Array.isArray(doc.suggestions)) {
+          throw new Error("Review file has no suggestions array");
+        }
+
+        const idx = Math.trunc(input.suggestionIndex);
+        if (idx < 0 || idx >= doc.suggestions.length) {
+          throw new Error("Suggestion index is out of range");
+        }
+
+        // Add index to the discarded_suggestions array on the document
+        if (!Array.isArray(doc.discarded_suggestions)) {
+          doc.discarded_suggestions = [];
+        }
+        if (!doc.discarded_suggestions.includes(idx)) {
+          doc.discarded_suggestions.push(idx);
+        }
+        await writeAgentReviewFile(ctx, run.filePath, doc);
+
+        // Also persist to the separate discarded list for future review prompts
+        const suggestion = doc.suggestions[idx];
+        const discarded = await getDiscardedSuggestions(ctx, input.repo, input.number);
+        discarded.push({
+          title: suggestion.title ?? "",
+          reason: suggestion.reason ?? "",
+          path: suggestion.path,
+          line: suggestion.line,
+          discardedAt: new Date().toISOString(),
+        });
+        await saveDiscardedSuggestions(ctx, input.repo, input.number, discarded);
+
+        return { ok: true };
+      },
+    },
+
+    listDiscardedSuggestions: {
+      input: {
+        type: "object",
+        properties: {
+          repo: { type: "string" },
+          number: { type: "number" },
+        },
+        required: ["repo", "number"],
+      },
+      handler: async (ctx, input: { repo: string; number: number }) => {
+        return getDiscardedSuggestions(ctx, input.repo, input.number);
+      },
+    },
   },
 
   onStop: async () => {
-    for (const unsub of unsubscribers) {
-      unsub();
-    }
-    unsubscribers = [];
-    agentReviewSessions.clear();
     prListCache.entry = null;
     prDetailCache.clear();
     prDiffCache.clear();

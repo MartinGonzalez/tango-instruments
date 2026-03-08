@@ -1,6 +1,6 @@
 // Agent Reviews tab — version selector + structured review display
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   useInstrumentApi,
   UIButton,
@@ -9,10 +9,8 @@ import {
   UIGroup,
   UIGroupList,
   UIGroupItem,
-  UIGroupEmpty,
   UIBadge,
   UIEmptyState,
-  UICard,
 } from "tango-api";
 import type {
   PullRequestAgentReviewRun,
@@ -24,6 +22,7 @@ import type {
 type Props = {
   repo: string;
   number: number;
+  headSha: string;
   agentReviews: PullRequestAgentReviewRun[];
 };
 
@@ -59,13 +58,17 @@ function levelTone(level: PullRequestAgentReviewLevel): "danger" | "warning" | "
   return "neutral";
 }
 
-export function AgentReviewsTab({ repo, number, agentReviews }: Props) {
+export function AgentReviewsTab({ repo, number, headSha, agentReviews }: Props) {
   const api = useInstrumentApi();
   const [selectedVersion, setSelectedVersion] = useState<number | null>(null);
   const [document, setDocument] = useState<PullRequestAgentReviewDocument | null>(null);
   const [loading, setLoading] = useState(false);
   const [applyingSet, setApplyingSet] = useState<Set<number>>(new Set());
   const [applyErrors, setApplyErrors] = useState<Map<number, string>>(new Map());
+  const [commentingSet, setCommentingSet] = useState<Set<number>>(new Set());
+  const [commentErrors, setCommentErrors] = useState<Map<number, string>>(new Map());
+  const [commentedSet, setCommentedSet] = useState<Set<number>>(new Set());
+  const [discardingSet, setDiscardingSet] = useState<Set<number>>(new Set());
 
   const sorted = [...agentReviews].sort((a, b) => a.version - b.version);
   const effectiveVersion = selectedVersion ?? sorted[sorted.length - 1]?.version ?? null;
@@ -120,6 +123,75 @@ export function AgentReviewsTab({ repo, number, agentReviews }: Props) {
     }
   }, [api, repo, number, effectiveVersion, loadDocument]);
 
+  const handleComment = useCallback(async (suggestionIndex: number) => {
+    if (!effectiveVersion || !document?.review) return;
+    const suggestion = document.review.suggestions[suggestionIndex];
+    if (!suggestion?.path || !suggestion?.line) return;
+
+    setCommentingSet((prev) => new Set([...prev, suggestionIndex]));
+    setCommentErrors((prev) => {
+      const next = new Map(prev);
+      next.delete(suggestionIndex);
+      return next;
+    });
+
+    const body = [
+      `**${suggestion.title}** (${suggestion.level})`,
+      "",
+      suggestion.reason,
+      "",
+      "**Suggested fix:**",
+      suggestion.solutions,
+    ].join("\n");
+
+    try {
+      await api.actions.call("createReviewComment", {
+        repo,
+        number,
+        commitSha: headSha,
+        path: suggestion.path,
+        line: suggestion.line,
+        side: "RIGHT",
+        body,
+      });
+      setCommentedSet((prev) => new Set([...prev, suggestionIndex]));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setCommentErrors((prev) => new Map([...prev, [suggestionIndex, message]]));
+    } finally {
+      setCommentingSet((prev) => {
+        const next = new Set(prev);
+        next.delete(suggestionIndex);
+        return next;
+      });
+    }
+  }, [api, repo, number, headSha, effectiveVersion, document]);
+
+  const handleDiscard = useCallback(async (suggestionIndex: number) => {
+    if (!effectiveVersion) return;
+    setDiscardingSet((prev) => new Set([...prev, suggestionIndex]));
+    try {
+      await api.actions.call("discardSuggestion", {
+        repo,
+        number,
+        version: effectiveVersion,
+        suggestionIndex,
+      });
+    } catch (err) {
+      console.error("discardSuggestion failed:", err);
+    }
+    try {
+      await loadDocument(effectiveVersion);
+    } catch {
+      // ignore
+    }
+    setDiscardingSet((prev) => {
+      const next = new Set(prev);
+      next.delete(suggestionIndex);
+      return next;
+    });
+  }, [api, repo, number, effectiveVersion, loadDocument]);
+
   if (sorted.length === 0) {
     return <UIEmptyState title="No agent reviews yet" />;
   }
@@ -127,7 +199,9 @@ export function AgentReviewsTab({ repo, number, agentReviews }: Props) {
   const review = document?.review ?? null;
   const parseError = document?.parseError ?? null;
   const renderedMarkdown = document?.renderedMarkdown ?? "";
-  const suggestions = review?.suggestions ?? [];
+  const allSuggestions = review?.suggestions ?? [];
+  const discardedIndices = new Set(review?.discarded_suggestions ?? []);
+  const suggestions = allSuggestions.filter((_, i) => !discardedIndices.has(i));
 
   return (
     <div className="tui-col" style={{ gap: 0 }}>
@@ -161,11 +235,17 @@ export function AgentReviewsTab({ repo, number, agentReviews }: Props) {
       ) : review ? (
         <StructuredReview
           review={review}
-          reviewVersion={effectiveVersion ?? 1}
           suggestions={suggestions}
+          allSuggestions={allSuggestions}
           applyingSet={applyingSet}
           applyErrors={applyErrors}
           onApply={handleApply}
+          commentingSet={commentingSet}
+          commentErrors={commentErrors}
+          commentedSet={commentedSet}
+          onComment={handleComment}
+          discardingSet={discardingSet}
+          onDiscard={handleDiscard}
         />
       ) : renderedMarkdown.trim() ? (
         <UISection>
@@ -180,111 +260,232 @@ export function AgentReviewsTab({ repo, number, agentReviews }: Props) {
 
 function StructuredReview({
   review,
-  reviewVersion,
   suggestions,
+  allSuggestions,
   applyingSet,
   applyErrors,
   onApply,
+  commentingSet,
+  commentErrors,
+  commentedSet,
+  onComment,
+  discardingSet,
+  onDiscard,
 }: {
   review: PullRequestAgentReviewData;
-  reviewVersion: number;
   suggestions: PullRequestAgentReviewData["suggestions"];
+  allSuggestions: PullRequestAgentReviewData["suggestions"];
   applyingSet: Set<number>;
   applyErrors: Map<number, string>;
   onApply: (index: number) => void;
+  commentingSet: Set<number>;
+  commentErrors: Map<number, string>;
+  commentedSet: Set<number>;
+  onComment: (index: number) => void;
+  discardingSet: Set<number>;
+  onDiscard: (index: number) => void;
 }) {
-  const metadataEntries = Object.entries(review.metadata ?? {});
-
   return (
     <div className="tui-col" style={{ gap: 0 }}>
-      <UISection title="PR Description">
-        <UIMarkdownRenderer content={review.pr_description || "_No PR description_"} />
-      </UISection>
-
-      <UISection title="Summary">
-        <UIMarkdownRenderer content={review.pr_summary || "_No summary_"} />
-      </UISection>
-
-      {metadataEntries.length > 0 && (
-        <UISection title="Metadata">
-          <UIGroupList>
-            {metadataEntries.map(([key, value]) => (
-              <UIGroupItem
-                key={key}
-                title={key.replace(/_/g, " ")}
-                meta={value}
+      <UIMarkdownRenderer content={[
+        `## Summary\n${review.pr_summary || "_No summary_"}`,
+        `## Strengths\n${review.strengths || "_No strengths_"}`,
+        `## Improvements\n${review.improvements || "_No improvements_"}`,
+        "## Suggestions",
+      ].join("\n")} />
+      {suggestions.length === 0 ? (
+        <UIEmptyState title="No suggestions" />
+      ) : (
+        <div className="tui-col" style={{ gap: 4 }}>
+          {suggestions.map((item) => {
+            const originalIndex = allSuggestions.indexOf(item);
+            return (
+              <SuggestionCard
+                key={originalIndex}
+                index={originalIndex}
+                item={item}
+                isApplying={applyingSet.has(originalIndex)}
+                errorMsg={applyErrors.get(originalIndex) ?? commentErrors.get(originalIndex) ?? null}
+                onApply={onApply}
+                isCommenting={commentingSet.has(originalIndex)}
+                isCommented={commentedSet.has(originalIndex)}
+                onComment={onComment}
+                isDiscarding={discardingSet.has(originalIndex)}
+                onDiscard={onDiscard}
               />
-            ))}
-          </UIGroupList>
-        </UISection>
+            );
+          })}
+        </div>
       )}
 
-      <UISection title="Strengths">
-        <UIMarkdownRenderer content={review.strengths || "_No strengths_"} />
-      </UISection>
-
-      <UISection title="Improvements">
-        <UIMarkdownRenderer content={review.improvements || "_No improvements_"} />
-      </UISection>
-
-      <UISection title="Suggestions">
-        {suggestions.length === 0 ? (
-          <UIEmptyState title="No suggestions" />
-        ) : (
-          <div className="tui-col" style={{ gap: 4 }}>
-            {suggestions.map((item, index) => {
-              const isApplying = applyingSet.has(index);
-              const isApplied = item.applied;
-              const errorMsg = applyErrors.get(index) ?? null;
-
-              const applyLabel = isApplying
-                ? "Applying..."
-                : isApplied
-                  ? "Applied"
-                  : "Apply";
-
-              return (
-                <UIGroup
-                  key={index}
-                  title={item.title || `Suggestion ${index + 1}`}
-                  meta={<UIBadge label={item.level} tone={levelTone(item.level)} />}
-                  actions={
-                    <UIButton
-                      label={applyLabel}
-                      variant={isApplied ? "ghost" : "secondary"}
-                      size="sm"
-                      disabled={isApplying || isApplied}
-                      onClick={() => onApply(index)}
-                    />
-                  }
-                >
-                  <div className="tui-col" style={{ padding: "8px 12px", gap: 12 }}>
-                    <SuggestionSection title="Why" markdown={item.reason || "_No reason provided_"} />
-                    <SuggestionSection title="Solution/Solutions" markdown={item.solutions || "_No solutions provided_"} />
-                    <SuggestionSection title="Benefit" markdown={item.benefit || "_No benefit provided_"} />
-                    {errorMsg && (
-                      <UIBadge label={errorMsg} tone="danger" />
-                    )}
-                  </div>
-                </UIGroup>
-              );
-            })}
-          </div>
-        )}
-      </UISection>
-
-      <UISection title="Final Veredic">
-        <UIMarkdownRenderer content={review.final_veredic || "_No final veredic_"} />
-      </UISection>
+      <UIMarkdownRenderer content={`## Final Verdict\n\n${review.final_veredic || "_No final verdict_"}`} />
     </div>
   );
 }
 
-function SuggestionSection({ title, markdown }: { title: string; markdown: string }) {
+function SuggestionCard({
+  index, item, isApplying, errorMsg, onApply,
+  isCommenting, isCommented, onComment,
+  isDiscarding, onDiscard,
+}: {
+  index: number;
+  item: PullRequestAgentReviewData["suggestions"][number];
+  isApplying: boolean;
+  errorMsg: string | null;
+  onApply: (index: number) => void;
+  isCommenting: boolean;
+  isCommented: boolean;
+  onComment: (index: number) => void;
+  isDiscarding: boolean;
+  onDiscard: (index: number) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const isApplied = item.applied;
+  const hasLocation = Boolean(item.path && item.line);
+
+  const applyLabel = isApplying
+    ? "Applying..."
+    : isApplied
+      ? "Applied"
+      : "Apply";
+
+  const commentLabel = isCommenting
+    ? "Commenting..."
+    : isCommented
+      ? "Commented"
+      : "Comment";
+
   return (
-    <div className="tui-col" style={{ gap: 4 }}>
-      <span style={{ fontWeight: 600, fontSize: "12px", color: "var(--tui-text-secondary)" }}>{title}</span>
-      <UIMarkdownRenderer content={markdown} />
+    <UIGroup
+      title={item.title || `Suggestion ${index + 1}`}
+      meta={<UIBadge label={item.level} tone={levelTone(item.level)} />}
+      expanded={expanded}
+      onToggle={setExpanded}
+      actions={
+        <div className="tui-row" style={{ gap: 4, alignItems: "center" }}>
+          {hasLocation && (
+            <UIButton
+              label={commentLabel}
+              icon="post"
+              variant={isCommented ? "ghost" : "secondary"}
+              size="sm"
+              disabled={isCommenting || isCommented}
+              onClick={() => onComment(index)}
+            />
+          )}
+          <UIButton
+            label={applyLabel}
+            variant={isApplied ? "ghost" : "secondary"}
+            size="sm"
+            disabled={isApplying || isApplied}
+            onClick={() => onApply(index)}
+          />
+          <KebabMenu
+            isDiscarding={isDiscarding}
+            onDiscard={() => onDiscard(index)}
+          />
+        </div>
+      }
+    >
+      <div className="tui-col" style={{ padding: "8px 12px", gap: 0 }}>
+        <UIMarkdownRenderer content={[
+          ...(hasLocation ? [`\`${item.path}:${item.line}\``] : []),
+          `**Why**\n${item.reason || "_No reason provided_"}`,
+          `**Solution/Solutions**\n${item.solutions || "_No solutions provided_"}`,
+          `**Benefit**\n${item.benefit || "_No benefit provided_"}`,
+        ].join("\n\n")} />
+        {errorMsg && (
+          <UIBadge label={errorMsg} tone="danger" />
+        )}
+      </div>
+    </UIGroup>
+  );
+}
+
+function KebabMenu({ isDiscarding, onDiscard }: {
+  isDiscarding: boolean;
+  onDiscard: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const stop = (e: React.MouseEvent) => e.stopPropagation();
+
+  return (
+    <div
+      ref={rootRef}
+      style={{ position: "relative" }}
+      onClick={stop}
+      onMouseDown={stop}
+    >
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          width: 28,
+          height: 28,
+          padding: 0,
+          background: open ? "var(--tui-bg-secondary, rgba(255,255,255,0.06))" : "none",
+          border: "1px solid transparent",
+          borderRadius: 6,
+          cursor: "pointer",
+          color: "var(--tui-text-secondary)",
+        }}
+        title="More actions"
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+          <circle cx="8" cy="3" r="1.5" />
+          <circle cx="8" cy="8" r="1.5" />
+          <circle cx="8" cy="13" r="1.5" />
+        </svg>
+      </button>
+      {open && (
+        <>
+          {/* Backdrop: fixed overlay to catch outside clicks */}
+          <div
+            style={{ position: "fixed", inset: 0, zIndex: 9999 }}
+            onClick={() => setOpen(false)}
+            onMouseDown={stop}
+          />
+          {/* Dropdown */}
+          <div
+            style={{
+              position: "absolute",
+              top: "100%",
+              right: 0,
+              marginTop: 4,
+              minWidth: 140,
+              background: "var(--tui-bg-elevated, #2a2a2a)",
+              border: "1px solid var(--tui-border)",
+              borderRadius: 8,
+              boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+              zIndex: 10000,
+              overflow: "hidden",
+            }}
+          >
+            <button
+              onClick={() => { setOpen(false); onDiscard(); }}
+              onMouseDown={stop}
+              disabled={isDiscarding}
+              style={{
+                display: "block",
+                width: "100%",
+                padding: "8px 12px",
+                background: "none",
+                border: "none",
+                color: "var(--tui-text-danger, #ef4444)",
+                fontSize: "13px",
+                textAlign: "left",
+                cursor: isDiscarding ? "wait" : "pointer",
+                opacity: isDiscarding ? 0.5 : 1,
+              }}
+            >
+              {isDiscarding ? "Discarding..." : "Discard"}
+            </button>
+          </div>
+        </>
+      )}
     </div>
   );
 }
