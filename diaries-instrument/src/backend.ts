@@ -17,26 +17,22 @@ const generationNonce = new Map<string, number>();
 
 const SUMMARY_PROMPT = `You are a diary summarizer for a developer's daily standup.
 
-Given a list of activities tagged with session IDs, consolidate them into high-level goals and return a JSON array.
+Given activities grouped by project and tagged with session IDs, consolidate them into high-level goals per project. Return a single JSON object keyed by project name.
 
 <rules>
 - CONSOLIDATE aggressively. Research, implementation, debugging, testing, and releasing for the same feature are ONE task, not separate ones.
-- A developer typically works on 1-3 goals per day. Output 1-3 tasks unless the work is genuinely unrelated.
+- A developer typically works on 1-3 goals per project per day. Output 1-3 tasks per project unless the work is genuinely unrelated.
 - "name": short goal title (3-8 words), e.g. "Pre-assigned query session IDs", "PR reviews"
 - "sessionIds": array of ALL session ID strings (from [sid:xxx] tags) across all sessions that contributed
 - "description": 2-4 sentence prose summary in past tense, first person. Cover the full arc: what was investigated, what was built, what was shipped. Be specific about file names, tools, features.
 - NEVER include raw prompts, questions, or AI responses in descriptions
 - NEVER include session IDs or metadata in descriptions — only in the sessionIds field
-- Return ONLY the JSON array, no markdown fences, no preamble
+- Return ONLY the JSON object, no markdown fences, no preamble
 </rules>
 
-<project>{{PROJECT}}</project>
+{{PROJECT_SECTIONS}}
 
-<work-context>
-{{ACTIVITIES}}
-</work-context>
-
-Return a JSON array of task objects: [{"name":"...","sessionIds":["..."],"description":"..."},...]`;
+Return a JSON object keyed by project name: {"ProjectA":[{"name":"...","sessionIds":["..."],"description":"..."}],"ProjectB":[...]}`;
 
 async function onStart(ctx: InstrumentBackendContext): Promise<void> {
   debugLog("backend", "onStart", "Backend starting...");
@@ -99,10 +95,8 @@ async function doGenerateSummary(
     }
   }
 
-  const projectTasks: Record<string, ProjectTask[]> = {};
-  const markdownSections: string[] = [];
-
-  for (const [project, activities] of byProject) {
+  // Build a single prompt with all projects
+  const projectSections = [...byProject.entries()].map(([project, activities]) => {
     const contextEntries = activities.map((a) => {
       const sid = String(a.metadata?.sessionId ?? "").slice(0, 8);
       const tag = sid ? `[sid:${sid}] ` : "";
@@ -113,41 +107,52 @@ async function doGenerateSummary(
       }
       return `${tag}[${a.category}] ${a.title}: ${a.description}`;
     }).join("\n\n");
+    return `<project name="${project}">\n${contextEntries}\n</project>`;
+  }).join("\n\n");
 
-    let tasks: ProjectTask[];
-    try {
-      const result = await ctx.host.sessions.query({
-        prompt: SUMMARY_PROMPT.replace("{{PROJECT}}", project).replace("{{ACTIVITIES}}", contextEntries),
-        model: "claude-haiku-4-5-20251001",
-        tools: [],
-      });
+  let projectTasks: Record<string, ProjectTask[]> = {};
+  const markdownSections: string[] = [];
 
-      const text = result.text.trim();
-      const jsonStr = text.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
-      const parsed = JSON.parse(jsonStr);
+  try {
+    const result = await ctx.host.sessions.query({
+      prompt: SUMMARY_PROMPT.replace("{{PROJECT_SECTIONS}}", projectSections),
+      model: "claude-haiku-4-5-20251001",
+      tools: [],
+    });
 
-      if (!Array.isArray(parsed)) throw new Error("Expected array");
+    const text = result.text.trim();
+    const jsonStr = text.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
+    const parsed = JSON.parse(jsonStr);
 
-      tasks = parsed.map((t: { name?: string; sessionIds?: string[]; description?: string }) => ({
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new Error("Expected object keyed by project");
+    }
+
+    for (const [project, tasks] of Object.entries(parsed)) {
+      if (!Array.isArray(tasks)) continue;
+      projectTasks[project] = (tasks as { name?: string; sessionIds?: string[]; description?: string }[]).map((t) => ({
         name: String(t.name ?? "Untitled"),
         sessionIds: Array.isArray(t.sessionIds) ? t.sessionIds.map(String) : [],
         description: String(t.description ?? ""),
       }));
-    } catch {
+    }
+  } catch {
+    // Fallback: simple concatenation per project
+    for (const [project, activities] of byProject) {
       const sessionIds = [...new Set(
         activities
           .map((a) => String(a.metadata?.sessionId ?? "").slice(0, 8))
           .filter(Boolean)
       )];
-      tasks = [{
+      projectTasks[project] = [{
         name: project,
         sessionIds,
         description: activities.map((a) => a.title).join(". "),
       }];
     }
+  }
 
-    projectTasks[project] = tasks;
-
+  for (const [project, tasks] of Object.entries(projectTasks)) {
     const taskMarkdown = tasks
       .map((t) => `### ${t.name}\n${t.description}`)
       .join("\n\n");
