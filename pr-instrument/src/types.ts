@@ -224,6 +224,16 @@ export type PullRequestAgentReviewSuggestion = {
   benefit: string;
   content: string;
   applied: boolean;
+  path?: string;
+  line?: number;
+};
+
+export type PullRequestDiscardedSuggestion = {
+  title: string;
+  reason: string;
+  path?: string;
+  line?: number;
+  discardedAt: string;
 };
 
 export type PullRequestAgentReviewData = {
@@ -233,6 +243,7 @@ export type PullRequestAgentReviewData = {
   strengths: string;
   improvements: string;
   suggestions: PullRequestAgentReviewSuggestion[];
+  discarded_suggestions: number[];
   final_veredic: string;
 };
 

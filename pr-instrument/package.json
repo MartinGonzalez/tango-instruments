@@ -45,6 +45,7 @@
       },
       "permissions": [
         "storage.properties",
+        "storage.files",
         "sessions",
         "stages.read",
         "stages.observe"

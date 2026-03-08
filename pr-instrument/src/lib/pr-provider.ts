@@ -215,6 +215,18 @@ export class PullRequestProvider {
     };
   }
 
+  async getRawDiff(
+    repo: string,
+    number: number,
+  ): Promise<string> {
+    return runGhText(this.#run, [
+      "api",
+      `repos/${repo}/pulls/${number}`,
+      "-H",
+      "Accept: application/vnd.github.v3.diff",
+    ]);
+  }
+
   async getPullRequestDiff(
     repo: string,
     number: number,
