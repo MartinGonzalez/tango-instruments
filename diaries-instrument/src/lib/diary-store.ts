@@ -38,7 +38,13 @@ export class DiaryStore {
 
   #withRawLock<T>(date: string, fn: () => Promise<T>): Promise<T> {
     const prev = this.#rawLock.get(date) ?? Promise.resolve();
-    const next = prev.then(fn, fn);
+    const withTimeout = () => Promise.race([
+      fn(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Storage lock timeout (10s)")), 10_000)
+      ),
+    ]);
+    const next = prev.then(withTimeout, withTimeout);
     this.#rawLock.set(date, next.then(() => {}, () => {}));
     return next;
   }
