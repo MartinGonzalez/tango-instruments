@@ -43,6 +43,9 @@
         "second": true,
         "right": false
       },
+      "backgroundRefresh": {
+        "mode": "keep-alive"
+      },
       "permissions": [
         "storage.properties",
         "storage.files",
