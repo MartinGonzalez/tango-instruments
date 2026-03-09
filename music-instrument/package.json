@@ -1,6 +1,6 @@
 {
   "name": "@tango/instrument-music",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
@@ -16,7 +16,7 @@
     "publish:major": "bun node_modules/tango-api/src/cli.ts publish major"
   },
   "dependencies": {
-    "tango-api": "github:MartinGonzalez/tango-api#v0.0.2-rc68"
+    "tango-api": "github:MartinGonzalez/tango-api#v0.0.2-rc69"
   },
   "devDependencies": {
     "@types/react": "^18.0.0",
