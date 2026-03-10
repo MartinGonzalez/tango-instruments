@@ -17,22 +17,45 @@ const generationNonce = new Map<string, number>();
 
 const SUMMARY_PROMPT = `You are a diary summarizer for a developer's daily standup.
 
-Given activities grouped by project and tagged with session IDs, consolidate them into high-level goals per project. Return a single JSON object keyed by project name.
+Given activities grouped by project, produce a JSON object with EXACTLY two top-level keys: "tldr" and "projects". No other top-level keys.
 
-<rules>
+<output_format>
+{
+  "tldr": [
+    "**Task name** — One-liner summary of what was done.",
+    "**Another task** — Another one-liner summary."
+  ],
+  "projects": {
+    "ProjectA": [
+      { "name": "Task name", "sessionIds": ["sid1"], "description": "2-4 sentence summary." }
+    ]
+  }
+}
+</output_format>
+
+<rules_for_tldr>
+- This is a markdown bullet list grouped by project, with nested action points
+- Top-level bullets are project names in bold: "**ProjectName**"
+- Nested bullets are concise action points (past tense, under 100 chars each)
+- Focus on what was shipped/done, not process details
+- These are for copy-pasting into daily standup messages
+- Example:
+  ["**Tango App**", "  - Implemented task lifecycle API for backends", "  - Released v0.0.2-rc69", "**Diaries**", "  - Fixed backend suspension with keep-alive mode"]
+</rules_for_tldr>
+
+<rules_for_projects>
 - CONSOLIDATE aggressively. Research, implementation, debugging, testing, and releasing for the same feature are ONE task, not separate ones.
 - A developer typically works on 1-3 goals per project per day. Output 1-3 tasks per project unless the work is genuinely unrelated.
-- "name": short goal title (3-8 words), e.g. "Pre-assigned query session IDs", "PR reviews"
+- "name": short goal title (3-8 words)
 - "sessionIds": array of ALL session ID strings (from [sid:xxx] tags) across all sessions that contributed
 - "description": 2-4 sentence prose summary in past tense, first person. Cover the full arc: what was investigated, what was built, what was shipped. Be specific about file names, tools, features.
 - NEVER include raw prompts, questions, or AI responses in descriptions
 - NEVER include session IDs or metadata in descriptions — only in the sessionIds field
-- Return ONLY the JSON object, no markdown fences, no preamble
-</rules>
+</rules_for_projects>
 
-{{PROJECT_SECTIONS}}
+Return ONLY the JSON object, no markdown fences, no preamble.
 
-Return a JSON object keyed by project name: {"ProjectA":[{"name":"...","sessionIds":["..."],"description":"..."}],"ProjectB":[...]}`;
+{{PROJECT_SECTIONS}}`;
 
 async function onStart(ctx: InstrumentBackendContext): Promise<void> {
   debugLog("backend", "onStart", "Backend starting...");
@@ -111,6 +134,7 @@ async function doGenerateSummary(
   }).join("\n\n");
 
   let projectTasks: Record<string, ProjectTask[]> = {};
+  let tldr: string[] = [];
   const markdownSections: string[] = [];
 
   try {
@@ -125,12 +149,20 @@ async function doGenerateSummary(
     const parsed = JSON.parse(jsonStr);
 
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      throw new Error("Expected object keyed by project");
+      throw new Error("Expected object with tldr and projects keys");
     }
 
-    for (const [project, tasks] of Object.entries(parsed)) {
+    // Parse tldr
+    if (Array.isArray(parsed.tldr)) {
+      tldr = parsed.tldr.map(String);
+    }
+
+    // Parse projects (new format) or fall back to old flat format
+    const projects = parsed.projects ?? parsed;
+    for (const [key, tasks] of Object.entries(projects)) {
+      if (key === "tldr") continue;
       if (!Array.isArray(tasks)) continue;
-      projectTasks[project] = (tasks as { name?: string; sessionIds?: string[]; description?: string }[]).map((t) => ({
+      projectTasks[key] = (tasks as { name?: string; sessionIds?: string[]; description?: string }[]).map((t) => ({
         name: String(t.name ?? "Untitled"),
         sessionIds: Array.isArray(t.sessionIds) ? t.sessionIds.map(String) : [],
         description: String(t.description ?? ""),
@@ -159,12 +191,30 @@ async function doGenerateSummary(
     markdownSections.push(`## ${project}\n${taskMarkdown}`);
   }
 
-  // Merge manual tasks back into projectTasks
+  // Merge manual tasks back into projectTasks and tldr
   for (const [proj, manualTasks] of manualTasksByProject) {
     if (!projectTasks[proj]) {
       projectTasks[proj] = [];
     }
     projectTasks[proj].push(...manualTasks);
+
+    // Append manual notes to tldr
+    const manualLines = manualTasks.map((t) => `  - ${t.description}`);
+    if (manualLines.length > 0) {
+      // Find if this project already has a header in tldr
+      const headerIdx = tldr.findIndex((l) => l.includes(`**${proj}**`));
+      if (headerIdx !== -1) {
+        // Insert after last nested item for this project
+        let insertAt = headerIdx + 1;
+        while (insertAt < tldr.length && tldr[insertAt].startsWith("  ")) {
+          insertAt++;
+        }
+        tldr.splice(insertAt, 0, ...manualLines);
+      } else {
+        // Add new project group
+        tldr.push(`**${proj}**`, ...manualLines);
+      }
+    }
   }
 
   // Re-read raw to get current hash (activities may have arrived during Haiku calls)
@@ -174,6 +224,7 @@ async function doGenerateSummary(
     generatedAt: new Date().toISOString(),
     rawHash: computeRawHash(currentRaw),
     dailySummary: markdownSections.join("\n\n"),
+    tldr,
     projectTasks,
   };
   await diaryStore.writeSummary(summary);
@@ -391,6 +442,7 @@ export default defineBackend({
             generatedAt: new Date().toISOString(),
             rawHash: raw ? computeRawHash(raw) : "",
             dailySummary: "",
+            tldr: [],
             projectTasks: {},
           };
         }

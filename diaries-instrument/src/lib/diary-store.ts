@@ -103,6 +103,7 @@ export class DiaryStore {
       lastUpdated: raw?.lastUpdated ?? summary?.generatedAt ?? "",
       sections: raw?.sections ?? {},
       dailySummary: summary?.dailySummary ?? "",
+      tldr: summary?.tldr ?? [],
       projectTasks: summary?.projectTasks ?? {},
       hasNewActivity,
     };

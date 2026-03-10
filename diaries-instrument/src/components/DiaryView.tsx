@@ -226,6 +226,16 @@ export function DiaryView() {
               </div>
             )}
 
+            {diary.tldr?.length > 0 && (
+              <UIMarkdownRenderer
+                content={
+                  "# TL;DR\n" +
+                  diary.tldr.join("\n") +
+                  "\n\n---"
+                }
+              />
+            )}
+
             {hasProjectTasks ? (
               <ProjectTasksView
                 projectTasks={diary.projectTasks}

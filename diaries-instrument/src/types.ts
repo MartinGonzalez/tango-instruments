@@ -41,6 +41,7 @@ export type DiarySummary = {
   generatedAt: string;
   rawHash: string;
   dailySummary: string;
+  tldr: string[];
   projectTasks: Record<string, ProjectTask[]>;
 };
 
@@ -50,6 +51,7 @@ export type DiaryEntry = {
   lastUpdated: string;
   sections: Record<string, DiarySection>;
   dailySummary: string;
+  tldr: string[];
   projectTasks: Record<string, ProjectTask[]>;
   hasNewActivity: boolean;
 };
